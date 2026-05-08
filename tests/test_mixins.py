@@ -1,5 +1,5 @@
 """Tests pros mixins de DB."""
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 
 import pytest
 from sqlalchemy import Integer, String, create_engine
@@ -25,14 +25,23 @@ def session() -> Session:
     return Session(engine)
 
 
+def _drop_tz(dt: datetime) -> datetime:
+    """Normaliza datetime pra naive UTC.
+
+    SQLite + SQLAlchemy tira o tzinfo no roundtrip, mesmo com
+    `DateTime(timezone=True)` — driver não tem suporte nativo a TZ-aware.
+    Postgres não tem esse problema. Pra tests independentes de driver, normaliza.
+    """
+    return dt.replace(tzinfo=None) if dt.tzinfo is not None else dt
+
+
 def test_timestamp_mixin_sets_created_at_on_insert(session: Session) -> None:
     p = Product(name="Wine")
     session.add(p)
     session.commit()
     session.refresh(p)
     assert p.created_at is not None
-    # Diff < 5s do now
-    delta = abs((datetime.now(UTC) - p.created_at).total_seconds())
+    delta = abs((_drop_tz(datetime.now(UTC)) - _drop_tz(p.created_at)).total_seconds())
     assert delta < 5
 
 
@@ -43,14 +52,10 @@ def test_timestamp_mixin_sets_updated_at(session: Session) -> None:
     session.refresh(p)
     initial_updated = p.updated_at
 
-    # Pequeno sleep não é necessário no SQLite memory — onupdate é
-    # disparado pela mutação, basta mexer + commit
     p.name = "Wine Reserve"
     session.commit()
     session.refresh(p)
-    # Changed at least once (timestamps may match if clock resolution low,
-    # but row triggered onupdate)
-    assert p.updated_at >= initial_updated
+    assert _drop_tz(p.updated_at) >= _drop_tz(initial_updated)
 
 
 def test_soft_delete_mixin_starts_null(session: Session) -> None:
@@ -71,4 +76,5 @@ def test_soft_delete_mixin_can_be_set(session: Session) -> None:
     session.commit()
     session.refresh(p)
     assert p.deleted_at is not None
-    assert abs((p.deleted_at - now).total_seconds()) < 1
+    delta = abs((_drop_tz(p.deleted_at) - _drop_tz(now)).total_seconds())
+    assert delta < 1
