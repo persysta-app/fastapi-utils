@@ -8,7 +8,33 @@
 
 ## 🚀 Fase ativa
 
-_(Sem fase ativa — v0.2.0 released 2026-05-08. Integração nos consumers é opt-in.)_
+_(Sem fase ativa — v0.3.0 released 2026-05-08. Migração Brevo é via config nos consumers, sem code change.)_
+
+## 🎯 v0.3.0 release ✅ (2026-05-08)
+
+- **Tag:** `v0.3.0`
+- **Mudanças:**
+  - Sentinela nova `BREVO_HTTP_HOST = "brevo-api"` no módulo `email`
+  - `_send_via_brevo_api()` — POST `https://api.brevo.com/v3/smtp/email`, auth header `api-key`, 201 = sucesso
+  - Anti-spam headers (Reply-To + List-Unsubscribe + List-Unsubscribe-Post) agora em TODOS os 3 modos (SMTP + SendGrid HTTP + Brevo HTTP). Bug-fix: SendGrid HTTP antes não passava — penalty Gmail/Yahoo.
+- **Tests:** 7 cases novos (6 Brevo + 1 SendGrid paridade), 13 anteriores mantidos. CI pass 22s.
+
+### Migração SendGrid → Brevo nos consumers (sem code change)
+
+**Persysta** (UI):
+1. Login system admin → `/system/email-settings`
+2. Trocar `Host` de `sendgrid-api` → `brevo-api`
+3. Trocar `Password` de `SG.xxx...` → `xkeysib-xxx...` (Brevo API key)
+4. Salvar + clicar "Enviar email de teste"
+
+**Vinon** (env vars Railway):
+1. `SMTP_HOST=brevo-api`
+2. `SMTP_PASSWORD=xkeysib-xxx...`
+3. Restart deploy
+
+Pré-requisitos no Brevo dashboard (operacional, fora da lib):
+- Sender `noreply@persysta.com` + `noreply@vinon.com.br` verificados
+- Domínios autenticados (DKIM + SPF + DMARC nos DNS)
 
 ## 🎯 v0.2.0 release ✅ (2026-05-08)
 
