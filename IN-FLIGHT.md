@@ -8,9 +8,19 @@
 
 ## 🚀 Fase ativa
 
-_(Sem fase ativa — Fases 0-2 concluídas em 2026-05-08. Hot zones liberadas.)_
+_(Sem fase ativa — v0.2.0 released 2026-05-08. Integração nos consumers é opt-in.)_
 
-## 🎯 Fases concluídas (2026-05-08, em ordem)
+## 🎯 v0.2.0 release ✅ (2026-05-08)
+
+- **Tag:** `v0.2.0` ([commit](https://github.com/persysta-app/fastapi-utils/commits/v0.2.0))
+- **Módulos novos:**
+  - `security_headers` — `add_security_headers_middleware(app, ...)` injeta X-Content-Type-Options, X-Frame-Options, Referrer-Policy, Permissions-Policy + HSTS em prod
+  - `health` — `build_health_router(...)` retorna APIRouter com /health (liveness) + /readyz (readiness com checks customizáveis)
+  - `audit` — `AuditLogMixin` + `log_action()` helper com extração automática de IP/UA do request
+- **Tests:** 22 cases novos (7 security_headers + 8 health + 7 audit), 33 anteriores mantidos
+- **Integração nos consumers:** OPT-IN. Lib disponível, swap nos consumers fica pra próxima janela.
+
+## 🎯 Fases v0.1.0 (2026-05-08, em ordem)
 
 ### Fase 0 — v0.1.0 release ✅
 
