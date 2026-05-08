@@ -1,25 +1,24 @@
-"""Email transactional service — SMTP STARTTLS + SendGrid HTTP API fallback.
+"""Email transactional service — SMTP + SendGrid HTTP API + Brevo HTTP API.
 
-Modo dual:
+Modo dual via `SMTPConfig.host`:
   - SMTP padrão (STARTTLS) — funciona com Gmail App Password, AWS SES,
-    SendGrid SMTP, qualquer MTA RFC-compliant.
-  - SendGrid HTTP API (host == `SENDGRID_HTTP_HOST`) — usa porta 443 em vez
-    de 587, contorna provedores que bloqueiam outbound SMTP (Railway Hobby,
-    alguns container envs).
-  - Dev mode (host vazio) — loga subject + body via `logging`, retorna
-    sucesso. Permite testar fluxo end-to-end sem MTA.
+    SendGrid SMTP, Brevo SMTP, qualquer MTA RFC-compliant.
+  - SendGrid HTTP API (host == `SENDGRID_HTTP_HOST`) — porta 443.
+  - Brevo HTTP API (host == `BREVO_HTTP_HOST`) — porta 443.
+  - Dev mode (host vazio) — loga via stdout, retorna sucesso.
 
-Async: `send_email(..., background_tasks=bt)` agenda o SMTP send pra rodar
-DEPOIS do response sair (FastAPI BackgroundTasks). Latência da request cai
-de ~3-5s pra ~10ms. Pra envios "blocking" (test SMTP da config UI), não
-passe `background_tasks` — chamada vira síncrona e retorna o resultado.
+HTTP providers existem porque alguns hosts (Railway Hobby etc.) bloqueiam
+outbound SMTP. HTTP API contorna usando porta 443.
+
+Async: `send_email(..., background_tasks=bt)` agenda o send pra rodar
+DEPOIS do response sair (FastAPI BackgroundTasks).
 
 A lib NÃO escreve em `email_logs` da app — caller passa callback `on_log`
-pra registrar no schema dele (Persysta usa `to_address`, Vinon usa
-`to_email`; cada um tem seu modelo).
+pra registrar no schema dele.
 """
 from .config import SMTPConfig
 from .service import (
+    BREVO_HTTP_HOST,
     SENDGRID_HTTP_HOST,
     EmailResult,
     OnLogCallback,
@@ -28,6 +27,7 @@ from .service import (
 
 __all__ = [
     "SENDGRID_HTTP_HOST",
+    "BREVO_HTTP_HOST",
     "EmailResult",
     "OnLogCallback",
     "SMTPConfig",

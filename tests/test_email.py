@@ -1,4 +1,4 @@
-"""Tests pra email.send_email() — modos dev / SMTP / SendGrid HTTP."""
+"""Tests pra email.send_email() — modos dev / SMTP / SendGrid HTTP / Brevo HTTP."""
 from __future__ import annotations
 
 from unittest.mock import MagicMock, patch
@@ -7,6 +7,7 @@ import httpx
 import pytest
 
 from persysta_utils.email import (
+    BREVO_HTTP_HOST,
     SENDGRID_HTTP_HOST,
     EmailResult,
     SMTPConfig,
@@ -157,6 +158,123 @@ def test_sendgrid_http_mode_network_error_returns_failed() -> None:
         )
     assert result.status == "failed"
     assert "ConnectError" in (result.error_message or "")
+
+
+def test_sendgrid_http_includes_anti_spam_headers() -> None:
+    """SendGrid HTTP API recebe Reply-To + List-Unsubscribe via campo `headers`."""
+    cfg = SMTPConfig(host=SENDGRID_HTTP_HOST, password="SG.x", from_addr="App <noreply@x.com>")
+    response = MagicMock(status_code=202, text="")
+    with patch("httpx.Client") as client_class:
+        client_class.return_value.__enter__.return_value.post.return_value = response
+        send_email(
+            to="user@x.com", subject="hi", html_body="<p>hi</p>",
+            text_body="hi", cfg=cfg,
+        )
+    payload = client_class.return_value.__enter__.return_value.post.call_args.kwargs["json"]
+    headers = payload["headers"]
+    assert headers["Reply-To"] == "App <noreply@x.com>"
+    assert "noreply@x.com" in headers["List-Unsubscribe"]
+    assert headers["List-Unsubscribe-Post"] == "List-Unsubscribe=One-Click"
+
+
+# ── Brevo HTTP API (Sendinblue) ──────────────────────────────────────────────
+
+
+def test_brevo_http_mode_posts_to_api() -> None:
+    cfg = SMTPConfig(host=BREVO_HTTP_HOST, password="xkeysib-test", from_addr="App <noreply@x.com>")
+    response = MagicMock(status_code=201, text='{"messageId": "<x@msg>"}')
+    with patch("httpx.Client") as client_class:
+        client_class.return_value.__enter__.return_value.post.return_value = response
+        result = send_email(
+            to="user@x.com", subject="hi", html_body="<p>hi</p>",
+            text_body="hi", cfg=cfg,
+        )
+    assert result.status == "sent"
+    post_args = client_class.return_value.__enter__.return_value.post.call_args
+    # Endpoint correto
+    assert post_args.args[0] == "https://api.brevo.com/v3/smtp/email"
+    # Auth via header `api-key` (não Bearer)
+    headers = post_args.kwargs["headers"]
+    assert headers["api-key"] == "xkeysib-test"
+    assert "Bearer" not in str(headers)
+    # Payload tem estrutura Brevo (sender + to + htmlContent + textContent)
+    payload = post_args.kwargs["json"]
+    assert payload["sender"]["email"] == "noreply@x.com"
+    assert payload["sender"]["name"] == "App"
+    assert payload["to"][0]["email"] == "user@x.com"
+    assert payload["subject"] == "hi"
+    assert payload["htmlContent"] == "<p>hi</p>"
+    assert payload["textContent"] == "hi"
+
+
+def test_brevo_http_mode_includes_anti_spam_headers() -> None:
+    cfg = SMTPConfig(host=BREVO_HTTP_HOST, password="xkeysib-test", from_addr="App <noreply@x.com>")
+    response = MagicMock(status_code=201, text="")
+    with patch("httpx.Client") as client_class:
+        client_class.return_value.__enter__.return_value.post.return_value = response
+        send_email(
+            to="user@x.com", subject="hi", html_body="<p>hi</p>",
+            text_body="hi", cfg=cfg,
+        )
+    payload = client_class.return_value.__enter__.return_value.post.call_args.kwargs["json"]
+    headers = payload["headers"]
+    assert headers["Reply-To"] == "App <noreply@x.com>"
+    assert "noreply@x.com" in headers["List-Unsubscribe"]
+    assert headers["List-Unsubscribe-Post"] == "List-Unsubscribe=One-Click"
+
+
+def test_brevo_http_mode_4xx_returns_failed() -> None:
+    cfg = SMTPConfig(host=BREVO_HTTP_HOST, password="xkeysib-bad")
+    response = MagicMock(status_code=401, text='{"code":"unauthorized","message":"invalid"}')
+    with patch("httpx.Client") as client_class:
+        client_class.return_value.__enter__.return_value.post.return_value = response
+        result = send_email(
+            to="user@x.com", subject="hi", html_body="<p>hi</p>",
+            text_body="hi", cfg=cfg,
+        )
+    assert result.status == "failed"
+    assert "401" in (result.error_message or "")
+
+
+def test_brevo_http_mode_no_api_key_fails() -> None:
+    cfg = SMTPConfig(host=BREVO_HTTP_HOST, password="")
+    result = send_email(
+        to="user@x.com", subject="hi", html_body="<p>hi</p>",
+        text_body="hi", cfg=cfg,
+    )
+    assert result.status == "failed"
+    assert "Brevo" in (result.error_message or "")
+
+
+def test_brevo_http_mode_network_error_returns_failed() -> None:
+    cfg = SMTPConfig(host=BREVO_HTTP_HOST, password="xkeysib-x")
+    with patch("httpx.Client") as client_class:
+        client_class.return_value.__enter__.return_value.post.side_effect = httpx.ConnectError("dns fail")
+        result = send_email(
+            to="user@x.com", subject="hi", html_body="<p>hi</p>",
+            text_body="hi", cfg=cfg,
+        )
+    assert result.status == "failed"
+    assert "ConnectError" in (result.error_message or "")
+
+
+def test_brevo_http_extra_headers_override_anti_spam() -> None:
+    """Caller pode sobrepor Reply-To via extra_headers."""
+    cfg = SMTPConfig(host=BREVO_HTTP_HOST, password="xkeysib-x", from_addr="App <noreply@x.com>")
+    response = MagicMock(status_code=201, text="")
+    with patch("httpx.Client") as client_class:
+        client_class.return_value.__enter__.return_value.post.return_value = response
+        send_email(
+            to="user@x.com", subject="hi", html_body="<p>hi</p>",
+            text_body="hi", cfg=cfg,
+            extra_headers={"Reply-To": "support@x.com", "X-Custom": "v"},
+        )
+    payload = client_class.return_value.__enter__.return_value.post.call_args.kwargs["json"]
+    headers = payload["headers"]
+    assert headers["Reply-To"] == "support@x.com"  # override
+    assert headers["X-Custom"] == "v"
+    # List-Unsubscribe ainda lá (default)
+    assert "List-Unsubscribe" in headers
 
 
 def test_anti_spam_headers_applied_in_smtp_mode() -> None:
