@@ -10,7 +10,7 @@ from .rate_limit import build_limiter
 from .security_headers import add_security_headers_middleware
 from .sentry import init_sentry
 
-__version__ = "0.2.0"
+__version__ = "0.3.0"
 
 __all__ = [
     # Errors

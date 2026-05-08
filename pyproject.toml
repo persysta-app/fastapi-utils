@@ -4,8 +4,8 @@ build-backend = "hatchling.build"
 
 [project]
 name = "persysta-platform-fastapi-utils"
-version = "0.2.0"
-description = "Shared utilities (errors, mixins, sentry init, rate limit, email service, security headers, health, audit log) for Persysta + Vinon"
+version = "0.3.0"
+description = "Shared utilities (errors, mixins, sentry init, rate limit, email service with Brevo + SendGrid HTTP, security headers, health, audit log) for Persysta + Vinon"
 readme = "README.md"
 requires-python = ">=3.10"
 license = {text = "MIT"}

@@ -1,4 +1,19 @@
-"""Email send — SMTP STARTTLS + SendGrid HTTP API + BackgroundTasks support."""
+"""Email send — SMTP STARTTLS + SendGrid HTTP API + Brevo HTTP API + BackgroundTasks.
+
+Modos via `cfg.host`:
+- `""`                      → dev mode (loga via stdout, retorna dev_logged)
+- `"sendgrid-api"`          → SendGrid HTTP API (porta 443)
+- `"brevo-api"`             → Brevo HTTP API (porta 443)
+- qualquer outro            → SMTP STARTTLS padrão
+
+HTTP providers existem porque alguns hosts (Railway Hobby etc.) bloqueiam
+outbound SMTP. HTTP API contorna usando porta 443 com a mesma API key.
+
+Anti-spam headers (Reply-To, List-Unsubscribe, List-Unsubscribe-Post)
+são adicionados em TODOS os modos — SMTP e ambos HTTP providers — pra
+paridade de deliverability (Gmail/Yahoo penalizam senders sem esses
+headers desde 2024).
+"""
 from __future__ import annotations
 
 import logging
@@ -15,10 +30,9 @@ from fastapi import BackgroundTasks
 
 from .config import SMTPConfig
 
-# Sentinela ativa SendGrid HTTP API em vez de SMTP. Justificativa: Railway
-# Hobby (e similares) bloqueia outbound SMTP, e SendGrid recomenda HTTP API
-# como alternativa. Mesma API key, porta 443.
+# Sentinelas dos providers HTTP API.
 SENDGRID_HTTP_HOST = "sendgrid-api"
+BREVO_HTTP_HOST = "brevo-api"
 
 log = logging.getLogger(__name__)
 
@@ -49,6 +63,34 @@ def _resolve_from(cfg: SMTPConfig, fallback_app_name: str = "App") -> str:
     return f"{fallback_app_name} <noreply@example.com>"
 
 
+def _anti_spam_headers(
+    cfg: SMTPConfig,
+    *,
+    fallback_app_name: str = "App",
+    extra: dict[str, str] | None = None,
+) -> dict[str, str]:
+    """Headers anti-spam padrão + extras do caller.
+
+    - `Reply-To`: usa o From — caso user responda, vai pro suporte.
+    - `List-Unsubscribe`: Gmail/Yahoo penalizam senders sem esse header
+      desde 2024 (requisito de bulk sender, mesmo em transacional).
+    - `List-Unsubscribe-Post`: marca como One-Click Unsubscribe (RFC 8058),
+      reduz spam scoring.
+
+    Caller pode sobrepor / adicionar via `extra`.
+    """
+    from_addr = _resolve_from(cfg, fallback_app_name)
+    _, from_email = parseaddr(from_addr)
+    headers = {
+        "Reply-To": from_addr,
+        "List-Unsubscribe": f"<mailto:{from_email}?subject=unsubscribe>",
+        "List-Unsubscribe-Post": "List-Unsubscribe=One-Click",
+    }
+    if extra:
+        headers.update(extra)
+    return headers
+
+
 def _build_message(
     *,
     cfg: SMTPConfig,
@@ -59,29 +101,14 @@ def _build_message(
     extra_headers: dict[str, str] | None,
     fallback_app_name: str,
 ) -> EmailMessage:
-    """Constrói EmailMessage com headers anti-spam (Reply-To, List-Unsubscribe).
-
-    Anti-spam scoring (Gmail/Yahoo One-Click Unsubscribe + better deliverability):
-      - Reply-To: usa o From — caso user responda, vai pro suporte.
-      - List-Unsubscribe: Gmail/Yahoo penalizam senders sem esse header
-        desde 2024 (requisito de bulk sender), mesmo em transacional.
-      - List-Unsubscribe-Post: marca como One-Click Unsubscribe compatível
-        (RFC 8058), reduz scoring de spam.
-    """
+    """Constrói EmailMessage com From/To/Subject + headers anti-spam."""
     msg = EmailMessage()
-    from_addr = _resolve_from(cfg, fallback_app_name)
-    _, from_email = parseaddr(from_addr)
-
-    msg["From"] = from_addr
+    msg["From"] = _resolve_from(cfg, fallback_app_name)
     msg["To"] = to
     msg["Subject"] = subject
-    msg["Reply-To"] = from_addr
-    msg["List-Unsubscribe"] = f"<mailto:{from_email}?subject=unsubscribe>"
-    msg["List-Unsubscribe-Post"] = "List-Unsubscribe=One-Click"
 
-    if extra_headers:
-        for k, v in extra_headers.items():
-            msg[k] = v
+    for k, v in _anti_spam_headers(cfg, fallback_app_name=fallback_app_name, extra=extra_headers).items():
+        msg[k] = v
 
     msg.set_content(text_body)
     msg.add_alternative(html_body, subtype="html")
@@ -94,6 +121,9 @@ def _send_via_sendgrid_api(
     subject: str,
     html_body: str,
     text_body: str,
+    *,
+    fallback_app_name: str = "App",
+    extra_headers: dict[str, str] | None = None,
 ) -> EmailResult:
     """Envia via SendGrid HTTP API. API key vem do `cfg.password`.
 
@@ -107,11 +137,13 @@ def _send_via_sendgrid_api(
             error_message="SendGrid API key missing — preencha o campo password com SG.xxx...",
         )
 
-    from_addr = _resolve_from(cfg)
+    from_addr = _resolve_from(cfg, fallback_app_name)
     from_name, from_email = parseaddr(from_addr)
     sender: dict[str, str] = {"email": from_email}
     if from_name:
         sender["name"] = from_name
+
+    headers = _anti_spam_headers(cfg, fallback_app_name=fallback_app_name, extra=extra_headers)
 
     payload: dict[str, Any] = {
         "personalizations": [{"to": [{"email": to}]}],
@@ -121,6 +153,7 @@ def _send_via_sendgrid_api(
             {"type": "text/plain", "value": text_body},
             {"type": "text/html", "value": html_body},
         ],
+        "headers": headers,
     }
 
     try:
@@ -131,6 +164,75 @@ def _send_via_sendgrid_api(
                 json=payload,
             )
         if response.status_code in (200, 202):
+            return EmailResult(status="sent", sent_at=datetime.now(UTC))
+        return EmailResult(
+            status="failed",
+            error_message=f"HTTP {response.status_code}: {response.text[:300]}",
+        )
+    except Exception as exc:
+        return EmailResult(
+            status="failed",
+            error_message=f"{type(exc).__name__}: {exc}",
+        )
+
+
+def _send_via_brevo_api(
+    cfg: SMTPConfig,
+    to: str,
+    subject: str,
+    html_body: str,
+    text_body: str,
+    *,
+    fallback_app_name: str = "App",
+    extra_headers: dict[str, str] | None = None,
+) -> EmailResult:
+    """Envia via Brevo (ex-Sendinblue) HTTP API. API key vem do `cfg.password`.
+
+    Brevo Transactional API responde 201 em sucesso com `{"messageId": "..."}`.
+    Erros 4xx/5xx vêm com `{"code": "...", "message": "..."}`.
+
+    Auth via header `api-key` (não Bearer, como SendGrid).
+    Endpoint: POST https://api.brevo.com/v3/smtp/email
+    Doc: https://developers.brevo.com/reference/sendtransacemail
+    """
+    api_key = cfg.password
+    if not api_key:
+        return EmailResult(
+            status="failed",
+            error_message="Brevo API key missing — preencha o campo password com xkeysib-xxx...",
+        )
+
+    from_addr = _resolve_from(cfg, fallback_app_name)
+    from_name, from_email = parseaddr(from_addr)
+    sender: dict[str, str] = {"email": from_email}
+    if from_name:
+        sender["name"] = from_name
+
+    headers = _anti_spam_headers(cfg, fallback_app_name=fallback_app_name, extra=extra_headers)
+
+    payload: dict[str, Any] = {
+        "sender": sender,
+        "to": [{"email": to}],
+        "subject": subject,
+        "htmlContent": html_body,
+        "textContent": text_body,
+        "headers": headers,
+    }
+
+    try:
+        with httpx.Client(timeout=30.0) as client:
+            response = client.post(
+                "https://api.brevo.com/v3/smtp/email",
+                headers={
+                    "api-key": api_key,
+                    "accept": "application/json",
+                    "content-type": "application/json",
+                },
+                json=payload,
+            )
+        # Brevo: 201 Created em sucesso (com messageId no body).
+        # Aceita 200 também por defesa — providers às vezes mudam status code.
+        if response.status_code in (200, 201, 202):
             return EmailResult(status="sent", sent_at=datetime.now(UTC))
         return EmailResult(
             status="failed",
@@ -179,7 +281,15 @@ def _do_send(
         log.info("[EMAIL DEV MODE] to=%s subject=%s\n%s", to, subject, text_body)
         result = EmailResult(status="dev_logged", sent_at=datetime.now(UTC))
     elif cfg.host == SENDGRID_HTTP_HOST:
-        result = _send_via_sendgrid_api(cfg, to, subject, html_body, text_body)
+        result = _send_via_sendgrid_api(
+            cfg, to, subject, html_body, text_body,
+            fallback_app_name=fallback_app_name, extra_headers=extra_headers,
+        )
+    elif cfg.host == BREVO_HTTP_HOST:
+        result = _send_via_brevo_api(
+            cfg, to, subject, html_body, text_body,
+            fallback_app_name=fallback_app_name, extra_headers=extra_headers,
+        )
     else:
         msg = _build_message(
             cfg=cfg,
@@ -217,7 +327,8 @@ def send_email(
 
     Modo dual:
       - `cfg.host == ""` → dev mode (loga, retorna `dev_logged`).
-      - `cfg.host == SENDGRID_HTTP_HOST` → SendGrid HTTP API (porta 443).
+      - `cfg.host == SENDGRID_HTTP_HOST` (`"sendgrid-api"`) → SendGrid HTTP API (porta 443).
+      - `cfg.host == BREVO_HTTP_HOST` (`"brevo-api"`) → Brevo HTTP API (porta 443).
       - outro `cfg.host` → SMTP STARTTLS padrão (porta `cfg.port`).
 
     Async: passe `background_tasks` (FastAPI). Worker roda DEPOIS do
